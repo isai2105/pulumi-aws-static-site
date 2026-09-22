@@ -1,0 +1,12 @@
+# The environments project: ONE project, one stack per environment (stage, prod), each a committed
+# Pulumi.<env>.yaml carrying the ten static-site:* keys. pulumi.get_stack() is the environment name.
+# No `backend:` block (LOCKED-1): the Makefile sets PULUMI_BACKEND_URL inline (s3://...) for every verb.
+name: static-site
+description: A private S3 origin behind CloudFront with edge policies, access logs, published SSM parameters and a GitHub OIDC deploy role
+runtime:
+  name: python
+  options:
+    # uv: the workspace .venv at the repository root (uv.lock is the dependency pin, UV_LOCKED=1 the guard).
+    toolchain: uv
+    # mypy --strict runs before every preview/up, the same way the Makefile's typecheck target runs it.
+    typechecker: mypy

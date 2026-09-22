@@ -1,0 +1,226 @@
+# pre-commit — the CI gate set, run before the push instead of after it.
+#
+# Install it once per clone:
+#
+#     brew install pre-commit   # or: pipx install pre-commit
+#     pre-commit install
+#
+# and every commit then runs the same checks a pull request runs, over the
+# files that commit touches; `pre-commit run --all-files` runs the lot on
+# demand. Nothing here is authoritative: the required status checks in
+# validate.yml are, and they run on the pushed commit whether or not this file
+# was ever installed. This is the shift-left copy, and its only job is to fail
+# in the shell a minute earlier than it would fail on GitHub.
+#
+# Which means the one property that matters is that it fails on exactly what
+# CI fails on. A local hook that is *weaker* than the gate it mirrors is worse
+# than no local hook at all: it hands back a green run that CI then
+# contradicts, and the next reflex is to distrust the gate rather than the
+# hook. That property decides the shape of this file, and it is why the
+# Python checks are `repo: local` wrappers around Makefile targets rather than
+# the upstream ruff and mypy hooks that would be the obvious choice.
+
+repos:
+  # -------------------------------------------------------------------------
+  # The Python and Pulumi checks, every one of them through the Makefile.
+  # -------------------------------------------------------------------------
+  #
+  # astral-sh/ruff-pre-commit and mirrors-mypy are the obvious wiring, and
+  # they lose on the property above in the same way antonbabenko's Terraform
+  # hooks lost in the Terraform repository. A `rev:` there is a second pin of
+  # ruff, in the one file that cannot read uv.lock, and `pre-commit
+  # autoupdate` moves it without touching pyproject.toml — after which the
+  # hook formats with one ruff and `make fmt-check` in CI checks with another,
+  # and the diff that fails is one nobody wrote. It also runs the tool from
+  # pre-commit's own environment, so `--locked` — the guard that makes uv.lock
+  # a pin at all — is not in the invocation. Calling the target keeps one
+  # invocation, one binary and one lock: ruff, mypy and pytest are whatever
+  # `uv run --locked --all-packages` resolves, which is what CI resolves.
+  #
+  # None of these reaches an AWS account. `preview-offline` is the one that
+  # runs the Pulumi CLI, and it does so against a file:// backend with every
+  # AWS variable cleared and the network black-holed after a cache warm-up,
+  # so a hook firing on a laptop with an expired session cannot fail for a
+  # reason about credentials — the failure the Terraform repository's
+  # `validate` hook taught `--no-verify` with, before it was fixed.
+  #
+  # The cost, named because everything here costs something: `preview-offline`
+  # takes about forty-five seconds (three variants, two previews each), so its
+  # trigger is the narrowest that still covers everything the preview reads.
+  # `pass_filenames: false` on all of them: the targets discover their own
+  # work, and appending a list of changed files to `make fmt` would ask make
+  # to build a goal named after a .py file.
+  - repo: local
+    hooks:
+      # `fmt` rather than `fmt-check`, so the hook fixes the formatting and
+      # reports "files were modified by this hook" instead of printing a diff
+      # and leaving the work to be redone by hand. The canonical form is
+      # generated, so there is nothing to preserve by refusing to write it.
+      #
+      # pyproject.toml and uv.lock are triggers because they are where ruff's
+      # version and rules live; the Makefile because it holds the invocation.
+      - id: ruff-format
+        name: ruff format (make fmt)
+        entry: make fmt
+        language: system
+        pass_filenames: false
+        files: \.py$|^pyproject\.toml$|^uv\.lock$|^Makefile$
+
+      - id: ruff
+        name: ruff check (make lint)
+        entry: make lint
+        language: system
+        pass_filenames: false
+        files: \.py$|^pyproject\.toml$|^uv\.lock$|^Makefile$
+
+      # Five mypy runs, one per Pulumi program plus one over the package, the
+      # unit tests and scripts/ — the Makefile says why it cannot be one.
+      - id: mypy
+        name: mypy --strict (make typecheck)
+        entry: make typecheck
+        language: system
+        pass_filenames: false
+        files: \.py$|^pyproject\.toml$|^uv\.lock$|^Makefile$
+
+      - id: pytest
+        name: pytest tests/unit (make test)
+        entry: make test
+        language: system
+        pass_filenames: false
+        files: \.py$|^pyproject\.toml$|^uv\.lock$|^Makefile$
+
+      # The credential-free preview with the policy pack and the offline
+      # pytest. Triggers on what the preview reads: the component, the pack,
+      # the offline program and its tests, the lock (a provider bump changes
+      # the plugin the preview loads), the CLI pin, the script itself.
+      - id: preview-offline
+        name: pulumi preview offline + policy pack (make preview-offline)
+        entry: make preview-offline
+        language: system
+        pass_filenames: false
+        files: ^packages/|^policy/|^tests/offline/|^uv\.lock$|^\.pulumi\.version$|^scripts/preview_offline\.sh$|^Makefile$
+
+      # `docs` rather than `docs-check`, for the reason `fmt` gives: the table
+      # is generated, so regenerate it. The README itself is a trigger and not
+      # only an output: the generated block looks like prose and sits in a
+      # file that is mostly prose, and a commit touching nothing but it would
+      # otherwise run no hook at all and discover the drift on GitHub.
+      - id: docs
+        name: interface table (make docs)
+        entry: make docs
+        language: system
+        pass_filenames: false
+        files: ^packages/static-site/|^scripts/gen_interface\.py$|^Makefile$
+
+  # -------------------------------------------------------------------------
+  # actionlint — the one CI check here that is not a Makefile target.
+  # -------------------------------------------------------------------------
+  #
+  # There is no `make actionlint` for it to be a second copy of, and `rev:` is
+  # a real pin here rather than a wrapper pin: the hooks file at v1.7.12 names
+  # the v1.7.12 image, which is the release validate.yml runs.
+  #
+  # The docker variant rather than the system one, because actionlint shells
+  # out to shellcheck for `run:` blocks and simply does less when shellcheck
+  # is not on PATH — no warning, a smaller set of findings, a green local run
+  # and a red CI one. The image carries shellcheck and pyflakes, so the hook
+  # checks what the job checks. It needs a running Docker daemon and fails
+  # loudly saying so when there is not one.
+  #
+  # The gap that remains: validate.yml pins the image by digest and this pins
+  # it by the tag the upstream hooks file carries, and `pre-commit autoupdate`
+  # will raise `rev:` without touching validate.yml. There is no clean fix —
+  # `rev:` cannot read the workflow — so it is accepted, and the standing
+  # obligation is that an actionlint bump is a two-file change.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint-docker
+        name: actionlint
+
+  # -------------------------------------------------------------------------
+  # shellcheck — scripts/*.sh, which no CI job reads on its own.
+  # -------------------------------------------------------------------------
+  #
+  # actionlint runs shellcheck over the workflows' `run:` blocks; nothing runs
+  # it over scripts/preview_offline.sh, which those blocks call. shellcheck-py
+  # downloads the pinned shellcheck release into pre-commit's environment, so
+  # `rev:` is a real pin of the tool (0.11.0) and not of a wrapper, and the
+  # verdict does not depend on which shellcheck a brew formula happens to be
+  # at. The version comment beside actionlint's image in validate.yml and the
+  # zizmor/trivy pins in the Makefile are the same idea for the same reason.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+
+  # -------------------------------------------------------------------------
+  # Whitespace and YAML well-formedness.
+  # -------------------------------------------------------------------------
+  #
+  # .editorconfig states the same rules; these are what enforce them on a
+  # commit made from an editor that did not read it. Markdown keeps its
+  # trailing double-space (a hard line break), as .editorconfig says.
+  # `check-yaml` parses every YAML file — the workflows, dependabot.yml, the
+  # Pulumi.yaml project files and the committed Pulumi.<stack>.yaml config —
+  # so a stray tab or an unbalanced quote is caught before actionlint or the
+  # CLI gets a turn.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: check-yaml
+
+  # -------------------------------------------------------------------------
+  # zizmor — the workflow hardening, through the Makefile like the six above.
+  # -------------------------------------------------------------------------
+  #
+  # `repo: local` rather than the upstream zizmorcore/zizmor hooks file: a
+  # `rev:` there would be a second pin, in the one file that cannot read
+  # ZIZMOR_VERSION, and it would run zizmor's own default invocation rather
+  # than the one `make audit` owns — without `--offline`, so the hook's
+  # verdict would depend on whether the shell has a GitHub token exported,
+  # which is the silent local-versus-CI divergence this file exists to rule
+  # out. `make audit` also runs `audit-policy` first, and rules 7–9 there are
+  # what keep the backups variable, the stale-lock flag and the policy-pack
+  # flag honest on every workflow edit.
+  #
+  # The trigger is written against what the target *collects*: workflows, the
+  # Dependabot configuration, composite action definitions from anywhere in
+  # the tree, this file (zizmor reads it as an input), and the Makefile (it
+  # holds the pins and the rules `make audit` runs with). The Makefile and the
+  # scripts are triggers for rule 8 as well.
+  - repo: local
+    hooks:
+      - id: zizmor
+        name: zizmor + audit-policy (make audit)
+        entry: make audit
+        language: system
+        pass_filenames: false
+        files: ^\.github/.*\.ya?ml$|(^|/)action\.ya?ml$|^\.pre-commit-(config|hooks)\.ya?ml$|^Makefile$|^scripts/.*\.sh$
+
+  # -------------------------------------------------------------------------
+  # gitleaks — offered, not required.
+  # -------------------------------------------------------------------------
+  #
+  # `stages: [manual]`, so it never runs on commit and never runs under
+  # `pre-commit run --all-files`. Run it deliberately:
+  #
+  #     pre-commit run --hook-stage manual gitleaks
+  #
+  # It is opt-in because a local secret scanner is not a control: anything it
+  # would catch is caught again by GitHub push protection on the receiving
+  # end, which is server-side and cannot be skipped — `--no-verify` skips
+  # every hook in this file. Kept because the reminder is still worth having:
+  # push protection rejects the push, and by then the secret is in a local
+  # commit that has to be rewritten out of the branch. The one value this
+  # repository handles that would trip it — PULUMI_CONFIG_PASSPHRASE — never
+  # belongs in a file: the committed stack files carry only an encryptionsalt.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        name: gitleaks
+        stages: [manual]

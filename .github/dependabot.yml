@@ -1,0 +1,271 @@
+# Dependabot, for two ecosystems: the GitHub Actions pins in .github/workflows/
+# and the Python closure in uv.lock. Deliberately for nothing else.
+#
+# The first entry covers the `uses:` pins — rule 1 at the top of validate.yml,
+# which says every one of them is a full commit SHA with the version tag beside
+# it as a comment. A SHA pin does not move, which is the whole point of it; the
+# price is that nothing moves it either, and an action pinned when its workflow
+# was written stays pinned there while the release it names is superseded.
+# This file is what proposes the move. One of the nine rules those files follow
+# has a deadline attached — rule 2's `using: node24`, against runners that drop
+# Node 20 on 23 September 2026.
+#
+# The second entry covers `pyproject.toml` and `uv.lock`: ruff, mypy, pytest,
+# PyYAML and — the ones that matter — `pulumi`, `pulumi-aws`, `pulumi-random`
+# and `pulumi-policy`. The provider pin lives in the lock, so a provider bump is
+# a Dependabot pull request here, which is what retired the Terraform
+# repository's `provider-lock-refresh.yml`. What Dependabot cannot bump — the
+# Pulumi CLI in `.pulumi.version`, the interpreter in `.python-version` — moves
+# only by a reviewed pull request, and the README's "Pinned by hand" section
+# carries the cadence note that workflow used to.
+#
+# ---------------------------------------------------------------------------
+# Why the `uv` ecosystem is present — the reversal of an argument
+# ---------------------------------------------------------------------------
+#
+# The Terraform repository this one reproduces argues at length, in this
+# position of this file, why its `terraform` ecosystem is *absent*: Dependabot
+# resolves a `.terraform.lock.hcl` on one platform, so a Dependabot-authored
+# lock carries one `h1:` hash where the committed file carries two, and the
+# narrowed file does not fail `init` — it stops being a lock and quietly
+# rewrites itself under whichever contributor or runner reaches it first. That
+# repository answers with its own monthly workflow that runs `providers lock`
+# for both platforms.
+#
+# The defect does not exist for `uv.lock`, and the reversal is stated here so
+# that a reader does not carry the Terraform-era rule across. A `uv.lock` is
+# cross-platform by construction: it records the resolution for every
+# platform the project's markers admit, with the hash of every wheel and
+# sdist, and it is the same file whoever resolved it and wherever. Dependabot
+# edits `pyproject.toml` and `uv.lock` together, and the result is the file
+# `uv lock` would have written on the CI runner or on the laptop. What is
+# lost against the retired workflow is the plan: a Dependabot pull request
+# carries a read-only token and cannot assume an OIDC role, so the preview
+# that plan.yml runs on a `pulumi*` bump goes red at `plan-gate` and the bump
+# is re-pushed from a branch, as plan.yml prescribes for a fork. A tool bump
+# — ruff, mypy, pytest — changes no plan and is fully exercised by the
+# `python`, `pytest` and `preview-offline` jobs running the locked tools, and
+# merges on those alone.
+#
+# Whether Dependabot's `uv` updater handles a workspace with
+# `{ workspace = true }` sources is confirmed on the first pull request it
+# opens, not assumed here; if the weekly cost turns out unacceptable, the
+# `python` group below moves to `open-pull-requests-limit: 0` and a manual
+# `uv lock --upgrade` cadence note replaces it.
+#
+# ---------------------------------------------------------------------------
+# The state of Dependabot's other two features on this repository
+# ---------------------------------------------------------------------------
+#
+# Version updates — this file — need nothing switched on anywhere; the config
+# is what enables them. Alerts and security updates are separate settings and
+# neither is enabled by this file. Stated rather than left to be discovered,
+# because on a public repository it is a choice and not a default anybody
+# inherits.
+#
+# Alerts stay off, and the reason is narrower than "not yet". GitHub's own page
+# on Dependabot alerts says it in one sentence: "For GitHub Actions, alerts are
+# only generated for actions that use semantic versioning, not SHA versioning."
+# Every `uses:` in this repository is a full commit SHA (rule 1), so for that
+# ecosystem the set of dependencies an alert could match is empty; zizmor's
+# `known-vulnerable-actions` is the check that actually operates there, through
+# the `audit-online` job in validate.yml. For the Python closure the `sca` job
+# in validate.yml runs `trivy fs uv.lock` on every pull request, which is the
+# same advisory data read at the moment it can be acted on rather than on the
+# day it is published against a repository nobody is touching. Two things
+# would change this answer: an action pinned by tag, or a wish to be paged on
+# a Python advisory between pull requests. At that point enabling is one call:
+# `gh api --method PUT repos/isai2105/pulumi-aws-static-site/vulnerability-alerts`.
+
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    # `/` is the whole repository for this ecosystem; Dependabot reads
+    # .github/workflows/ from it. There are no composite actions here, and no
+    # workflow file calls a local one.
+    directory: "/"
+
+    schedule:
+      interval: "weekly"
+      # Tuesday, and not the Monday e2e.yml occupies whenever its schedule is
+      # enabled. The ordering is the argument: with that schedule live,
+      # e2e.yml applies and destroys `stage` on Monday at 04:17 UTC against
+      # whatever `main` currently locks, and this bump proposal arrives the
+      # morning after — so what it proposes moving away from was exercised
+      # end to end a day earlier rather than a week earlier. That cron is
+      # commented out, so neither half of it holds today: nothing occupies
+      # Monday, and nothing produces the day-earlier evidence either. Tuesday
+      # stays regardless, because e2e.yml keeps that cron as an edit somebody
+      # can uncomment rather than a setting somebody can toggle: the collision
+      # comes back with it, and a slot moved now is a slot to move back then.
+      # Early in the week for e2e.yml's stated reason: a failure gets the week
+      # to be dealt with rather than a weekend to sit through.
+      day: "tuesday"
+      time: "04:23"
+      # Written down rather than inherited. Etc/UTC is Dependabot's default,
+      # and every other schedule in this repository is stated in UTC; a
+      # default that moves is one this file would not notice moving.
+      timezone: "Etc/UTC"
+
+    # Seven days of aging before a freshly published tag can be proposed.
+    #
+    # This is not a preference, it is a finding taken at face value. zizmor
+    # 1.30.1 has a `dependabot-cooldown` audit that runs offline, at the
+    # default persona, with no token — which is to say inside `make audit`,
+    # which is the required `zizmor` check. Measured 2026-09-21: this file
+    # with both `cooldown:` blocks deleted produces two
+    # `warning[dependabot-cooldown]: insufficient cooldown in Dependabot
+    # updates` at medium severity, one per entry, annotating each
+    # `package-ecosystem` line with `insufficient implicit default-days (less
+    # than 7)`, and `zizmor --offline --strict-collection .` exits non-zero.
+    # The commit that added Dependabot would have blocked itself.
+    #
+    # The other way to clear that finding is to lower zizmor's threshold in a
+    # configuration file, and it is the wrong way: a suppression bought
+    # against a gate is the shape the Makefile rejects at length. The finding
+    # is also defensible on its own terms here. A repository whose rule 1 is
+    # about not trusting a tag that can be moved has no business proposing a
+    # tag published this morning — which is why the `astral-sh/setup-uv` pin
+    # in validate.yml is v10.1.0 and not the v10.2.0 released the day the pin
+    # was written.
+    #
+    # The second-order effect, because it is not obvious: `cooldown` delays
+    # eligibility and `schedule: weekly` decides when eligibility is checked,
+    # so a release published the day after a Tuesday run waits seven days to
+    # become eligible and then to the following Tuesday to be seen — about
+    # fourteen days from publication to pull request, worst case. That is the
+    # cost of the posture and it is affordable for this ecosystem.
+    cooldown:
+      default-days: 7
+
+    # `ci`, without a trailing colon, and the scope switched on.
+    #
+    # The pull request title becomes the squashed commit subject and is
+    # checked by the `pr-title` job in validate.yml against
+    # `^(feat|fix|docs|style|refactor|test|build|ci|chore|perf|revert)(\([^()]+\))?!?: .+$`
+    # — a required check, so a Dependabot pull request that fails it is a pull
+    # request nobody can merge.
+    #
+    # The colon is Dependabot's to add and not this file's, which is worth
+    # stating because writing `prefix: "ci:"` here is the obvious guess and it
+    # is wrong in a way that only shows up with `include: "scope"` set. Read
+    # from dependabot-core, `PrNamePrefixer#prefix_from_explicitly_provided_details`:
+    # the scope is appended first, then `":"` only if the result ends in a
+    # letter, digit or closing bracket, then a space. So `"ci"` becomes
+    # `ci(deps): ` and matches; `"ci:"` becomes `ci:(deps): `, which does not
+    # match, because the regex wants the scope between the type and the colon.
+    #
+    # `prefix-development` is not set on this entry, and that is not an
+    # omission. It is documented as applying to Bundler, Composer, Mix, Maven,
+    # NPM, Pip and uv, and never to `github-actions`; a line here would have
+    # no reader.
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+
+    # One pull request for every action, rather than one per action.
+    #
+    # `actions/checkout` alone appears in every job of validate.yml that
+    # checks anything out, and the three workflows Phase 4 adds all check out.
+    # Ungrouped, a single checkout bump is one pull request rewriting a dozen
+    # lines across four files, and it arrives beside however many other
+    # actions moved that week.
+    #
+    # Grouped, it is one pull request, one run of the required checks, and —
+    # the part that actually costs a person time — one pass of the two
+    # obligations no tool holds: rule 2's `using: node24` at each new SHA, and
+    # a read of the new SHA against the tag comment beside it. `audit-online`
+    # in validate.yml runs the second of those automatically on the pull
+    # request. The first is still a person, and grouping is what keeps it to
+    # one sitting a week.
+    #
+    # `open-pull-requests-limit` is deliberately not set. Under a single
+    # wildcard group there is at most one open pull request for this
+    # ecosystem, so the default of five is never approached, and a `1` written
+    # here would be a second bound that does nothing today and starves the
+    # next group somebody adds — silently, because a Dependabot pull request
+    # that is never opened produces no error anywhere. The group is the bound;
+    # a number repeating it would only be able to be wrong.
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+    # `labels:` is deliberately absent, and its absence is what gets the pull
+    # requests labelled at all.
+    #
+    # Read from dependabot-core's `PullRequestCreator::Labeler`:
+    # `create_default_dependencies_label_if_required` and
+    # `create_default_language_label_if_required` both open with
+    # `return if custom_labels`, and `labels_for_pr` then intersects the
+    # configured list with the labels the repository already has. So writing
+    # `labels: ["dependencies"]` on a repository that has no `dependencies`
+    # label suppresses the creation *and* then intersects to nothing: every
+    # pull request arrives with no labels at all. GitHub's default label set
+    # for a new repository carries neither `dependencies` nor an ecosystem
+    # label, so the branch that creates them is the one worth taking.
+    #
+    # `target-branch` is absent too, for a plainer reason: its default is the
+    # default branch, which is what is wanted, and setting it has documented
+    # interactions with security updates that this repository has no reason to
+    # take on.
+    #
+    # `insecure-external-code-execution` is likewise absent. Its default is
+    # `deny`; zizmor's `dependabot-execution` audit fires on `allow`, and the
+    # quiet way to satisfy that audit is to not write the key.
+
+  - package-ecosystem: "uv"
+    # The workspace root: `pyproject.toml` declares the dev tools and the
+    # members, `uv.lock` beside it is the one lock for every member, and the
+    # provider pins are in `packages/static-site/pyproject.toml`, which the
+    # workspace resolution reaches from here.
+    directory: "/"
+
+    # The same slot as the actions entry above, for the same reasons, and so
+    # that the two land in one maintenance sitting when both have something to
+    # propose. A `uv` pull request touches `pyproject.toml` and `uv.lock`;
+    # plan.yml's `detect` job selects every stack for it only when a `pulumi*`
+    # package's locked version moved, so a tool bump runs no plan and takes no
+    # state lock.
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "04:23"
+      timezone: "Etc/UTC"
+
+    # The same seven days, for the same `dependabot-cooldown` finding, and for
+    # a reason with more weight here: a provider release is a bridged
+    # terraform-provider-aws release underneath, and a week is about the time
+    # its own regressions take to be reported.
+    cooldown:
+      default-days: 7
+
+    # `build`, the Conventional Commits type for a dependency change, with the
+    # scope on: `build(deps): ` and `build(deps-dev): ` both match the
+    # `pr-title` regex, for the reason argued on the actions entry.
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
+    # One pull request for the whole Python closure, rather than one per
+    # package. The arithmetic is the same as for the actions group: every
+    # member of the workspace shares one lock, so a single package moving is
+    # one lock diff whichever pull request carries it, and the checks that
+    # prove the diff — `python`, `pytest`, `preview-offline` against the
+    # locked tools and the locked provider — run once per pull request.
+    groups:
+      python:
+        patterns:
+          - "*"
+
+    # A major version of any `pulumi*` package arrives as a hand-written pull
+    # request carrying the migration guide, never as a Tuesday bump. The 7.0
+    # migration renamed resources this repository uses (`BucketV2` and the
+    # `…V2` S3 sub-resources, per the 7.0 guide), and the next major will do
+    # the same to something; a pull request whose whole body is a version
+    # number is the wrong place to discover it. Minor and patch bumps of the
+    # same packages are proposed as normal — they are what this entry is for.
+    ignore:
+      - dependency-name: "pulumi*"
+        update-types: ["version-update:semver-major"]

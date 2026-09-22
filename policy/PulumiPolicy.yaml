@@ -1,0 +1,10 @@
+# The CrossGuard pack (LOCKED-3, LOCKED-4): passed as `--policy-pack <absolute path>` to every preview
+# and up. It reads the validated stack's own static-site:* config (policy/stack_config.py), so it takes
+# no --policy-pack-config and has no per-environment config file of its own.
+description: Interface and posture rules for pulumi-aws-static-site stacks
+runtime:
+  name: python
+  options:
+    # uv: the pack imports pulumi_policy and static_site from the workspace .venv (verified, plan section 7 V0-3).
+    toolchain: uv
+version: 0.0.1

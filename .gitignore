@@ -1,0 +1,25 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Local backends and credentials
+bootstrap/.pulumi-state/
+backend.env
+
+# Outputs of `pulumi preview --save-plan` and of scripts/preview_offline.sh (written at the repository root)
+*.plan.json
+preview.*.txt
+preview.*.json
+
+# The credential-free preview's throwaway stack and file:// backend
+tests/offline/Pulumi.test.yaml
+tests/offline/.state/
+
+# Working notes
+tradeoffs.md
+
+# No blanket *.yaml rule: envs/Pulumi.<stack>.yaml and bootstrap/Pulumi.bootstrap.yaml are committed inputs.

@@ -1,0 +1,13 @@
+# The bootstrap project: state bucket, OIDC provider, plan/apply roles, boundary (docs/BOOTSTRAP.md).
+# Hand-applied against a file:// backend under bootstrap/.pulumi-state/ (gitignored).
+# No `backend:` block (LOCKED-1): the Makefile sets PULUMI_BACKEND_URL inline for every verb;
+# a URL written here would be overridden silently by any exported variable.
+name: static-site-bootstrap
+description: Bootstrap for pulumi-aws-static-site - state bucket, GitHub OIDC provider, CI roles and the app-deploy permissions boundary
+runtime:
+  name: python
+  options:
+    # uv: the workspace .venv at the repository root (uv.lock is the dependency pin, UV_LOCKED=1 the guard).
+    toolchain: uv
+    # mypy --strict runs before every preview/up, the same way the Makefile's typecheck target runs it.
+    typechecker: mypy

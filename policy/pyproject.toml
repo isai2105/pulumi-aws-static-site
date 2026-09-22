@@ -1,0 +1,11 @@
+[project]
+name = "static-site-policy"
+version = "0.1.0"
+requires-python = ">=3.13.15"
+dependencies = [
+    "pulumi-policy==1.21.0",
+    "static-site",
+]
+
+[tool.uv.sources]
+static-site = { workspace = true }

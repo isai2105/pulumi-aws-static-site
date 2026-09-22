@@ -1,0 +1,1063 @@
+# Validation that runs on every pull request.
+#
+# Ten jobs, none of which needs an AWS account, a role or a state bucket: the
+# Python jobs run ruff, mypy and pytest over the locked toolchain, the offline
+# preview runs the real `pulumi-aws` plugin against a `file://` backend with
+# providers whose credentials cannot reach AWS, Trivy reads `uv.lock`, the docs
+# check renders a dataclass into a README, and the rest never touch a cloud
+# provider at all. That is what lets this gate land before the code it gates,
+# and what keeps it fast enough to be a required check.
+#
+# Seven of the ten are required checks in the branch ruleset — `python`,
+# `pytest`, `preview-offline`, `docs-check`, `actionlint`, `zizmor` and
+# `pr-title`; the eighth context, `plan-gate`, belongs to plan.yml and joins
+# the ruleset when that workflow does. Three are deliberately not required:
+# `cross-root-consistency` has no subject until the environment stack files
+# exist and is advisory after that; `sca` reads a vulnerability database that
+# moves without a commit; `audit-online` needs a GitHub token and reports on an
+# advisory database rather than on this tree, so it can go red on a Tuesday
+# without this repository having changed. All three run here anyway, and where
+# a reader of the Checks list will ask why one is not required, the answer is
+# with the matching target in the Makefile and repeated in short beside the job
+# below.
+#
+# ---------------------------------------------------------------------------
+# The hardening these workflow files share
+# ---------------------------------------------------------------------------
+#
+# Nine rules, one policy, applied to every workflow in the repository — and
+# stated here in full, because plan.yml, apply.yml and e2e.yml follow the same
+# nine and should not each carry their own copy of the argument. Rules 1–6 are
+# ported unchanged from the Terraform repository this one reproduces; rules 7–9
+# are new, and each names the Pulumi-specific failure it prevents.
+#
+# Who holds which rule, because a green check reads as though it had read the
+# whole list and it has not. Measured against zizmor 1.30.1 and actionlint
+# 1.7.12 on 2026-09-21 rather than assumed:
+#
+#   rules 1, 3, 6      the `zizmor` job below, through `unpinned-uses` (high),
+#                      `excessive-permissions` (medium) and `artipacked`
+#                      (medium).
+#   rules 4, 5, 7, 8, 9  `make audit-policy`, which the same job runs — a
+#                      handful of anchored greps plus the working-directory
+#                      guard beside rule 9, because at no persona and in
+#                      neither mode does zizmor say anything about a
+#                      `runs-on: ubuntu-latest`, a job with no
+#                      `timeout-minutes`, a missing environment variable, a uv
+#                      flag or a Pulumi command line, and actionlint has no
+#                      rule for any of them.
+#   rule 2             nobody. The node24 check has no tool at all, offline or
+#                      on, and rule 2 says so where it is written.
+#
+# Rule 1 is split, which is the one place this list is finer than it looks. That
+# a `uses:` is pinned at all is zizmor's; that the version comment beside the
+# pin is the tag it claims is `ref-version-mismatch`'s, and that audit does not
+# run offline — so it is `make audit-online`, which the `audit-online` job below
+# runs on every pull request. The split is still worth writing out, because what
+# it costs is visible in the Checks list: rule 1's first half blocks a merge and
+# its second half goes red beside a merge button that still works.
+#
+# `actionlint` covers none of the nine and is not the weaker linter for it: it
+# checks a workflow's syntax, its expressions and, through shellcheck, its `run:`
+# blocks. A mistyped `permissions:` key is its finding and not zizmor's; an
+# over-broad one is zizmor's and not its. The two run in both directions and
+# neither has a timeout rule.
+#
+# Writing the division out is the point rather than a footnote to it. Three more
+# workflows are authored after this file, and one of them is `e2e.yml`, the
+# only file in the repository that holds an apply role — stage's — with nobody
+# watching, destroying real infrastructure on demand. One rule of the nine
+# reaches it through a person reading this list, and the list has to say which.
+#
+# 1. Every `uses:` is a full commit SHA, with the version tag beside it as a
+#    comment. A tag can be moved, a commit cannot. The comment is not
+#    decoration: each SHA here was produced by dereferencing that tag through
+#    the GitHub API (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`) rather
+#    than copied out of a README, and it is what the next bump gets read
+#    against — including by Dependabot, which is the thing doing the bumping:
+#    .github/dependabot.yml, weekly, every action in one grouped pull request.
+#    One zizmor audit checks that pairing, `ref-version-mismatch`, and a
+#    second, `impostor-commit`, checks the narrower thing that the SHA belongs
+#    to the repository it is written against at all. Neither runs offline, so
+#    neither runs in the `zizmor` job below. **The `audit-online` job below
+#    runs both, on every pull request**, which is where a moved pin arrives
+#    whether Dependabot moved it or a person did.
+#
+# 2. Every pinned SHA declares `using: node24` in that action's own `action.yml`
+#    at that SHA — checked when the pin is written and again when it is bumped.
+#    A SHA pin freezes the action's JavaScript runtime along with its code, and
+#    Node 20 stopped being the runner default on 16 June 2026 and is removed
+#    from runners on 23 September 2026: a node20-era pin therefore works
+#    perfectly right up to that date and then fails everywhere at once. Nothing
+#    about such a pin is malformed, so neither actionlint nor zizmor has a word
+#    to say about it — one of the rules held by hand rather than by a tool, and
+#    the only one of them with a deadline. Of the four actions used in this
+#    file, three are `node24` (checked 2026-09-21 at the pinned SHAs:
+#    actions/checkout, astral-sh/setup-uv, pulumi/actions);
+#    `aquasecurity/setup-trivy` is a composite action and has no JavaScript
+#    runtime to pin.
+#
+#    What .github/dependabot.yml changes is not the rule but how often it comes
+#    due. The obligation arrives every Tuesday, on a pull request nobody
+#    planned, against a date that does not move. Nothing automates it — not
+#    zizmor at any persona in either mode, not actionlint, not
+#    `make audit-policy`, and not the `audit-online` job below, which reads the
+#    tag comment beside a SHA and has no opinion about the runtime declared at
+#    it. Opening `action.yml` at each proposed SHA is a person's job, weekly,
+#    until 23 September 2026 is behind this repository rather than ahead of it.
+#
+# 3. `permissions: {}` at workflow level, with the minimum granted per job. An
+#    empty block is not the same as no block: with no block at all every job
+#    inherits the repository's default token permissions, which is a setting
+#    outside this file and can be widened without touching it. Written out, the
+#    default is nothing and every grant below is a line somebody chose to add.
+#
+# 4. `runs-on: ubuntu-24.04`, never `ubuntu-latest`, for the reason the Pulumi
+#    CLI is pinned to a patch in `.pulumi.version` and the provider to a patch
+#    in `uv.lock`. The floating label has already moved once, from 22.04 to
+#    24.04, and will move again on a schedule GitHub picks rather than this
+#    repository. `ubuntu-22.04` is not the alternative — it began brownout on
+#    17 September 2026. The image is a pin like the toolchain's, and it lives
+#    in the same place they do: `RUNNER_IMAGE` in the Makefile, which
+#    `make audit-policy` checks every `runs-on:` in this directory against.
+#    Changing the image is a one-line change there.
+#
+# 5. `timeout-minutes` on every job. GitHub's default is six hours, and the
+#    failure shape in an infrastructure pipeline is a hang rather than a crash:
+#    a state lock waited on indefinitely, a provider waiter that does not
+#    return. Fifteen minutes here and in plan.yml; apply.yml and e2e.yml carry
+#    larger numbers and argue them where they sit. They are deliberately loose,
+#    and the looseness is the point — a timeout that fires on a slow success is
+#    worse than no timeout, so what these bound is a wedged runner rather than a
+#    slow one. That every job has one is checked by `make audit-policy`, which
+#    counts rather than matches: it can say a file is one timeout short and not
+#    which job is short of it.
+#
+# 6. Every `checkout` sets `persist-credentials: false`. The action otherwise
+#    writes the job's token into `.git/config`, where every later step of the
+#    job can read it — the Pulumi CLI's own `uv sync`, the provider plugin it
+#    downloads, anything shipped inside a third-party action, anything that
+#    reads the working tree. Nothing in this repository pushes, so nothing
+#    needs it. This is zizmor's `artipacked` finding, and the one rule of the
+#    first six that came from the tool rather than from the policy.
+#
+# 7. Every workflow that mentions the Pulumi CLI — the word `pulumi` on any
+#    non-comment line: `uses: pulumi/actions@`, `pulumi-version-file:`, a
+#    `pulumi` command in a `run:` block, anything — sets
+#    `PULUMI_DIY_BACKEND_DISABLE_CHECKPOINT_BACKUPS: "1"` exactly once, as a
+#    key of the workflow-level `env:` block, so that every job inherits it and
+#    none can override it. The DIY backend's `backupStack` runs once, after a
+#    successful `up`, `refresh` or `destroy`, *after* the checkpoint and the
+#    history entry are written, and its error is returned as the operation's
+#    (`pkg/backend/diy/backend.go:1465-1482` at v3.263.0). The apply roles
+#    grant nothing on `.pulumi/backups/` by design (LOCKED-5), so a workflow
+#    that omits the variable reports a successful apply as a failed run —
+#    `error: saving backup: … AccessDenied`, exit 1, the resources present in
+#    `pulumi stack output` — and in e2e.yml that failure lands after
+#    `armed=true`, so it also triggers the cleanup destroy and an
+#    `orphaned-resources` issue for a clean environment. The value must be
+#    literally `1` or `true`: set-but-empty, `0` and `yes` do not disable
+#    backups (`sdk/go/common/util/env/env.go:338-347`). `make audit-policy`
+#    asserts it with two greps — an unanchored count of non-comment lines
+#    carrying the bare suffix `DISABLE_CHECKPOINT_BACKUPS`, which must be
+#    exactly one, and an anchored count of the two-space workflow-level key
+#    with the full DIY name and the literal value, which must also be one.
+#    The unanchored count is on the suffix so that the CLI's alternative
+#    name, `PULUMI_DISABLE_CHECKPOINT_BACKUPS`
+#    (`env.Alternative("DISABLE_CHECKPOINT_BACKUPS")`,
+#    `sdk/go/common/env/env.go:203-205`), counts as the second mention it is;
+#    a job- or step-level override does the same, and either fails the file
+#    rather than passing it. The trigger is the word rather than a spelling of
+#    the invocation on purpose: a job with a working directory set and a bare
+#    `pulumi up` line runs the CLI without ever writing the `-C` form, and
+#    over-triggering costs only an env line a workflow that names the CLI
+#    should carry anyway. This file is a subject because `preview-offline`
+#    installs and runs the CLI; a preview never reaches `backupStack` (it is a
+#    dry run), and the line is here because the rule keys on the CLI being
+#    named, not on the verb.
+#
+# 8. No `--frozen` and no `UV_FROZEN` on any non-comment line of the Makefile,
+#    the workflows, `scripts/*.sh` or `.pre-commit-config.yaml`. `--frozen` is
+#    the flag form of `UV_FROZEN=1`: it uses `uv.lock` as it is, without
+#    checking it against `pyproject.toml`, and prints `warning: Ignoring
+#    UV_LOCKED because --frozen was provided` — so one occurrence both runs a
+#    stale lock silently and disables the `UV_LOCKED=1` guard the Makefile
+#    exports for the CLI's own `uv sync --inexact`, which takes no flag
+#    (measured 2026-09-21, uv 0.12.12). The one spelling this repository uses
+#    is `--locked` on every `uv run`/`uv sync` it writes and `UV_LOCKED: "1"`
+#    in the environment for what the Pulumi CLI runs on its own: a drifted lock
+#    is `error: The lockfile at uv.lock needs to be updated`, a red job rather
+#    than a quiet one.
+#
+# 9. Every non-comment line under `.github/workflows/` that runs a preview or
+#    an up — the word `pulumi` followed later on the same line by the bare
+#    word `preview` or `up`, whatever flags sit between, or a pulumi/actions
+#    `command:` input naming either verb — carries both `-C envs` and
+#    `--policy-pack "$GITHUB_WORKSPACE/policy"` on that same line. Two
+#    spellings are therefore mandatory. `-C envs`, so the stack a line touches
+#    is readable off the line: never `--cwd`, never a `cd`, never a working
+#    directory. And the absolute pack path, because `-C` changes directory
+#    before the flag is resolved, so a bare `policy` is `envs/policy` and fails
+#    to load. It is on every preview and every up so that the one path that
+#    changes `prod` — apply.yml's saving preview and its constrained
+#    `up --plan` — is policed by the same pack as the pull-request preview and
+#    the e2e up, and so that the asymmetry of one unpoliced `up` cannot recur
+#    silently. The `command:` form can never satisfy the rule, which is the
+#    point: pulumi/actions is install-only in this repository and its
+#    `work-dir`/`policyPacks` inputs would move both facts off the line the
+#    grep reads. `destroy` is excluded because it has no such flag on 3.263.0,
+#    and `scripts/preview_offline.sh` because it is a script rather than a
+#    workflow. A line that merely mentions `pulumi` beside the word `up` or
+#    `preview` — an `echo`, say — trips the rule too, and is reworded rather
+#    than exempted. A backslash-continued command is joined and read as one
+#    line, numbered by its first physical line, so wrapping after `-C envs`
+#    hides nothing; a trailing `# …` comment on the line is not read, so a
+#    comment ending in `up` is not a verb. Write `run:` as a plain or block
+#    scalar, never a YAML double-quoted string: that spelling escapes the
+#    pack's quotes and fails the match. A verb held in a shell variable
+#    (`verb=up; pulumi -C envs "$verb"`) is not seen — deliberate evasion, not
+#    an accident, and left to review because variables as arguments
+#    (`--stack "$ENV"`) must stay legal. This file runs neither verb; the rule
+#    has no subject here and reads it as a pass.
+#
+#    Beside rule 9, one guard that is not a numbered rule of the policy but
+#    what keeps rule 9 honest: no `working-directory:` key, no `work-dir:` key
+#    and no `--cwd` on any non-comment line under `.github/workflows/`. With a
+#    working directory set, a bare `pulumi up` in a step runs against `envs/`
+#    with nothing for rule 9 to read, and rule 9's whole claim is that the
+#    stack and the pack are readable off the line. Every `run:` block in this
+#    repository runs from the checkout root and says where it means with `-C`.
+#
+# Every rule 7, 8, 9 and cwd pattern excludes comment lines, which is what
+# lets this header spell them out; the Makefile's own recipe lines spell the
+# rule 8 pattern with a bracket so they do not match themselves.
+
+name: validate
+
+on:
+  pull_request:
+    # `edited` matters: without it a pull request whose title was rejected and
+    # then corrected would never be re-checked.
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+
+# Nothing by default, granted back one job at a time below. Rule 3 above.
+permissions: {}
+
+# No `concurrency` block: no job here takes a lock or persists anything, so two
+# runs of the same ref cannot contend and there is nothing a cancellation could
+# strand. plan.yml and apply.yml carry one each and argue it where it sits.
+
+env:
+  # Rule 7 above: workflow level, once, the literal value. The offline preview
+  # is a dry run and never reaches `backupStack`; the line is here because the
+  # rule keys on the CLI being named, which `preview-offline` does.
+  PULUMI_DIY_BACKEND_DISABLE_CHECKPOINT_BACKUPS: "1"
+  # The CLI otherwise checks for a newer release on every invocation, which is
+  # a network call that changes nothing about the run and a line of noise in
+  # every log.
+  PULUMI_SKIP_UPDATE_CHECK: "true"
+  # Rule 8 above: the Pulumi CLI runs its own `uv sync --inexact` before every
+  # preview and takes no lock flag, so the guard against a drifted lock has to
+  # be in the environment. Belt and braces for the explicit `uv sync --locked`
+  # steps below, which carry the flag form of the same guard.
+  UV_LOCKED: "1"
+
+jobs:
+  # Format, lint and types of the Python sources, driven through the Makefile
+  # so that CI and a local shell run the identical commands. `ruff format
+  # --check` is the `terraform fmt -check` of this repository, `ruff check` the
+  # tflint, and `mypy --strict` — five invocations, one per Pulumi project plus
+  # one over the package, the unit tests and the scripts — half of what
+  # `terraform validate` used to be; the offline preview below is the other
+  # half.
+  python:
+    name: python
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned uv version
+        id: uv-version
+        # `[tool.uv] required-version` in pyproject.toml is the pin: uv enforces
+        # it on every invocation, `make check-uv` names it, and setup-uv would
+        # read the same key on its own with no `version:` at all. It is read
+        # through the Makefile and passed in explicitly so that the version
+        # this job installs is visible in the step rather than implied by a
+        # default.
+        run: echo "version=$(make -s print-uv-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ steps.uv-version.outputs.version }}
+          # No GitHub Actions cache. Every package this job runs is resolved
+          # from `uv.lock` on every run, which is the property the `--locked`
+          # sync below proves; a restored cache would be a second source of
+          # packages the job did not resolve, and the Terraform repository's
+          # jobs install from the pin every run for the same reason.
+          enable-cache: false
+
+      - name: Install the locked closure of every workspace member
+        # `--all-packages`, not a bare sync: a root sync alone installs the
+        # root's closure and prunes every member's — `mypy --strict envs` then
+        # cannot import `pulumi_aws` (measured 2026-09-21, uv 0.12.12). `--locked`
+        # refuses a lock that does not match any pyproject.toml in the
+        # workspace; rule 8 above says why the other flag does not.
+        run: uv sync --locked --all-packages
+
+      - name: Check formatting, lint and types
+        run: make fmt-check lint typecheck
+
+  # The unit tier: pure functions with no Pulumi runtime — validation rules,
+  # naming, the policy-document builders — under pytest. A separate job from
+  # `python` above rather than another target on the same one, for the reason
+  # every job here is separate: a red check should name what broke.
+  pytest:
+    name: pytest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned uv version
+        id: uv-version
+        run: echo "version=$(make -s print-uv-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ steps.uv-version.outputs.version }}
+          enable-cache: false
+
+      - name: Install the locked closure of every workspace member
+        run: uv sync --locked --all-packages
+
+      - name: Run the unit tests
+        run: make test
+
+  # The credential-free preview: the empty-or-real `StaticSite` component run
+  # through the real `pulumi-aws` plugin against a throwaway `file://` backend,
+  # with the CrossGuard policy pack attached, and the resulting JSON asserted
+  # by pytest. This is what replaces `terraform test` and the module example:
+  # every resource's `Check` runs in the provider, every interface and posture
+  # policy runs against the preview, and a policy that is *skipped* because it
+  # read an unknown value fails the run rather than passing it.
+  #
+  # It is required rather than advisory because the paths it covers are the
+  # ones nothing else can. Every environment in this repository leaves
+  # `domainName` unset, so the optional-domain wiring is exercised by no plan,
+  # no apply and no end-to-end run — only by this preview's two custom-domain
+  # variants. A check that is advisory on the only coverage a code path has is
+  # coverage nobody reads.
+  #
+  # No credentials, no OIDC, and nothing granted below beyond the `contents:
+  # read` its checkout needs — deliberate on both sides. The providers the
+  # offline program declares carry fake keys and the three `skip_*` flags, and
+  # `AWS_EC2_METADATA_DISABLED` below closes the one credential source that
+  # needs no configuration to be found. Giving this job credentials anyway
+  # would mask the property if it ever stopped being true. There is no network
+  # isolation on the job either, on purpose: the script warms the plugin and
+  # package caches and then black-holes its own outbound traffic through a
+  # proxy at 127.0.0.1:9, so the no-network property is the script's rather
+  # than the runner's, and the same command proves the same thing on a laptop.
+  preview-offline:
+    name: preview-offline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # The SDK's last resort for credentials is the instance metadata
+      # endpoint. A GitHub-hosted runner has none, and the variable makes that
+      # a fact of the job rather than of the runner it happened to land on.
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned uv version
+        id: uv-version
+        run: echo "version=$(make -s print-uv-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ steps.uv-version.outputs.version }}
+          enable-cache: false
+
+      - name: Install the locked closure of every workspace member
+        run: uv sync --locked --all-packages
+
+      - name: Install the pinned Pulumi CLI
+        # No `command`: with none the action installs the CLI named by
+        # `.pulumi.version` onto PATH and exits, which is all this job wants
+        # from it. The verbs are the Makefile's, so that a local run and a
+        # green check are the same command; `make check-pulumi` then demands
+        # exactly the version this step installed.
+        uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7.0.0
+        with:
+          pulumi-version-file: .pulumi.version
+
+      - name: Run the offline preview and the policy pack
+        run: make preview-offline
+
+  # The three strings that couple the bootstrap project to the environment
+  # stacks, and that nothing else can check.
+  #
+  # No preview can see this. The bootstrap and the environments are separate
+  # projects with separate state, deliberately: the bootstrap exposes no stack
+  # reference for the environments to read, so no expression in either
+  # references the other and no preview compares them. What holds them equal is
+  # that somebody typed the same thing three times.
+  #
+  # `bootstrap/oidc.py` spends all of them. `namePrefix` composes the site
+  # bucket pattern, the CloudFront function pattern, the access log group
+  # pattern and the `aws:ResourceTag/Name` conditions on the distribution and
+  # certificate statements; `environments` composes the per-environment
+  # renderings of the three inline policies and the exact app deploy role ARN
+  # in each. A disagreement in either does not fail at preview. It fails at
+  # apply, as an AccessDenied naming a resource rather than naming the mistake,
+  # after the bootstrap has already been hand-applied and the operator has
+  # moved on.
+  #
+  # Both are already guarded at runtime — a wrong `namePrefix` is refused at
+  # `s3:CreateBucket`, a wrong environment at `iam:CreateRole` — and those
+  # guards are why the failure is survivable rather than silent. This job is
+  # the cheaper half of the same control: the runtime guards cost a failed
+  # apply against a real account to learn something a string comparison in a
+  # credential-free lane can say at review time.
+  #
+  # Not a required check, and it exits 0 with a notice while no
+  # `envs/Pulumi.<env>.yaml` exists: an advisory job should not be red for
+  # want of a subject, and the first pull requests of this repository have
+  # none. No AWS anything. Three files read, no network, no role, no token.
+  cross-root-consistency:
+    name: cross-root-consistency
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check namePrefix, project, awsRegion and environments agree across the stack files
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          failed=0
+          fail() {
+            echo "::error::$*"
+            failed=1
+          }
+
+          bootstrap_file="bootstrap/Pulumi.bootstrap.yaml"
+
+          # The environment stack files are the third party to the agreement:
+          # an environment listed in the bootstrap with no stack file to apply
+          # it is as broken as a stack file the bootstrap issues no role for.
+          # `envs/Pulumi.yaml` is the project file and does not match the glob.
+          env_files=(envs/Pulumi.*.yaml)
+          if [ "${#env_files[@]}" -eq 0 ]; then
+            echo "::notice::No envs/Pulumi.<env>.yaml exists yet, so there is nothing for this job to compare." \
+              "It starts checking on the pull request that adds the first environment stack file."
+            echo "cross-root consistency: skipped (no environment stack files)"
+            exit 0
+          fi
+
+          if [ ! -f "$bootstrap_file" ]; then
+            fail "${bootstrap_file} is missing while environment stack files exist:" \
+              "$(printf '%s ' "${env_files[@]}")" \
+              "Every environment's apply role and its three inline policies are composed from that file."
+            echo "cross-root consistency: FAILED"
+            exit 1
+          fi
+
+          # One `<namespace>:<key>: <value>` line, at exactly two spaces —
+          # where a stack file's `config:` keys sit — with an optional pair
+          # of double quotes around the value. Anchored to the start of the
+          # line so a mention inside a comment cannot match: every comment
+          # line in these files begins with `#`.
+          read_key() {
+            sed -n "s/^  $2: *\"\{0,1\}\([^\"]*\)\"\{0,1\} *\$/\1/p" "$1" | head -n 1
+          }
+
+          # `environments`, written either as a flow sequence on the key's own
+          # line (`["stage", "prod"]`) or as a block sequence of `    - name`
+          # lines beneath it, flattened to one name per line.
+          read_environments() {
+            awk '
+              /^  static-site-bootstrap:environments:[[:space:]]*\[/ {
+                s = $0
+                sub(/^[^[]*\[/, "", s)
+                sub(/\].*$/, "", s)
+                n = split(s, parts, ",")
+                for (i = 1; i <= n; i++) {
+                  v = parts[i]
+                  gsub(/[[:space:]"]/, "", v)
+                  if (v != "") print v
+                }
+                exit
+              }
+              /^  static-site-bootstrap:environments:[[:space:]]*$/ { inlist = 1; next }
+              inlist && /^    - / { v = $0; sub(/^    - */, "", v); gsub(/[[:space:]"]/, "", v); print v; next }
+              inlist { exit }
+            ' "$1" | sort
+          }
+
+          bootstrap_prefix="$(read_key "$bootstrap_file" static-site-bootstrap:namePrefix)"
+          bootstrap_project="$(read_key "$bootstrap_file" static-site-bootstrap:project)"
+          bootstrap_region="$(read_key "$bootstrap_file" static-site-bootstrap:awsRegion)"
+          bootstrap_environments="$(read_environments "$bootstrap_file")"
+
+          [ -n "$bootstrap_prefix" ] || fail "could not read static-site-bootstrap:namePrefix from ${bootstrap_file}"
+          [ -n "$bootstrap_project" ] || fail "could not read static-site-bootstrap:project from ${bootstrap_file}"
+          [ -n "$bootstrap_region" ] || fail "could not read static-site-bootstrap:awsRegion from ${bootstrap_file}"
+          [ -n "$bootstrap_environments" ] || fail "could not read static-site-bootstrap:environments from ${bootstrap_file}"
+
+          stack_environments="$(
+            for file in "${env_files[@]}"; do
+              name="${file#envs/Pulumi.}"
+              echo "${name%.yaml}"
+            done | sort
+          )"
+
+          if [ "$bootstrap_environments" != "$stack_environments" ]; then
+            fail "${bootstrap_file} environments does not match the envs/Pulumi.<env>.yaml files." \
+              "bootstrap lists: $(echo "$bootstrap_environments" | tr '\n' ' ')." \
+              "envs/ contains: $(echo "$stack_environments" | tr '\n' ' ')." \
+              "Each entry composes an apply role and its three inline policies in bootstrap/oidc.py."
+          fi
+
+          for file in "${env_files[@]}"; do
+            environment="${file#envs/Pulumi.}"
+            environment="${environment%.yaml}"
+
+            prefix="$(read_key "$file" static-site:namePrefix)"
+            project="$(read_key "$file" static-site:project)"
+            region="$(read_key "$file" static-site:awsRegion)"
+
+            if [ -z "$prefix" ]; then
+              fail "could not read static-site:namePrefix from ${file}"
+            elif [ "$prefix" != "$bootstrap_prefix" ]; then
+              fail "namePrefix disagrees: ${bootstrap_file} has '${bootstrap_prefix}', ${file} has '${prefix}'." \
+                "Every resource-level grant and tag condition in bootstrap/oidc.py is composed from the bootstrap value;" \
+                "the environments name their resources from theirs."
+            fi
+
+            if [ -z "$project" ]; then
+              fail "could not read static-site:project from ${file}"
+            elif [ "$project" != "$bootstrap_project" ]; then
+              fail "project disagrees: ${bootstrap_file} has '${bootstrap_project}', ${file} has '${project}'." \
+                "It is the Project tag the teardown sweep queries; a value that matches nothing reports clean over a leak."
+            fi
+
+            if [ -z "$region" ]; then
+              fail "could not read static-site:awsRegion from ${file}"
+            elif [ "$region" != "$bootstrap_region" ]; then
+              fail "awsRegion disagrees: ${bootstrap_file} has '${bootstrap_region}', ${file} has '${region}'." \
+                "The state bucket and the environment's regional resources must share a region for the backend URL to resolve."
+            fi
+
+            # The stack name is the environment: `pulumi.get_stack()` cannot
+            # disagree with the file it was selected from, which is what
+            # retired the Terraform repository's fourth copy of the string.
+            # What is checked here is only that the file name is a name the
+            # bootstrap issued a role for, and that comparison is the set
+            # comparison above.
+            echo "  ${environment}: namePrefix=${prefix} project=${project} awsRegion=${region}"
+          done
+
+          if [ "$failed" -ne 0 ]; then
+            echo "cross-root consistency: FAILED"
+            exit 1
+          fi
+
+          echo "cross-root consistency: ok"
+          echo "  namePrefix   = ${bootstrap_prefix} (bootstrap and every environment)"
+          echo "  project      = ${bootstrap_project}"
+          echo "  awsRegion    = ${bootstrap_region}"
+          echo "  environments = $(echo "$bootstrap_environments" | tr '\n' ' ')"
+
+  # The generated half of the component's README — the `StaticSiteArgs` fields
+  # and the component's outputs, rendered between the `BEGIN_INTERFACE` and
+  # `END_INTERFACE` markers — checked against the dataclass it claims to
+  # describe. `scripts/gen_interface.py` reads Python and renders markdown, so
+  # like everything above it this reaches no AWS API and needs no credentials.
+  #
+  # This is a check and not a fix: `make docs-check` fails on drift rather than
+  # regenerating and pushing. A job that committed its own correction would
+  # report green on work nobody reviewed, and would push to a pull request
+  # branch — which is why this job's grant below stops at `contents: read`, and
+  # why its checkout does not keep the token it arrived with.
+  #
+  # It is required rather than advisory because the failure it catches is
+  # invisible. Stale generated documentation does not break a preview or an
+  # apply; it sits beside the component looking authoritative while describing
+  # an interface that has moved, and the next three commits that touch the
+  # component's arguments and outputs are exactly where that happens. A local
+  # hook cannot cover it either: the first commit pushed from a clone without
+  # the hook installed is the one that lands the drift.
+  docs-check:
+    name: docs-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned uv version
+        id: uv-version
+        run: echo "version=$(make -s print-uv-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ steps.uv-version.outputs.version }}
+          enable-cache: false
+
+      - name: Install the locked closure of every workspace member
+        run: uv sync --locked --all-packages
+
+      - name: Check the generated component documentation
+        run: make docs-check
+
+  # Known vulnerabilities in the locked Python closure — `uv.lock`, dev group
+  # included, because ruff, mypy and pytest run on every runner here from the
+  # same lock. This is the one job Trivy still has in this repository: no
+  # third-party misconfiguration scanner reads Pulumi Python (LOCKED-4), so the
+  # posture rules Trivy used to supply over HCL are the policy pack that
+  # `preview-offline` runs, and what is left for Trivy is dependency scanning.
+  #
+  # Not a required check, and it cannot be: `make scan` needs the vulnerability
+  # database, which moves without a commit, so this job can take `main` red on
+  # a Tuesday with nothing in this repository having changed — the same
+  # argument that keeps `audit-online` below out of the ruleset. Not
+  # `continue-on-error: true` either: that flag renders a failure as a green
+  # tick with an annotation beside it, which is the "green check nobody reads"
+  # shape this repository turns down everywhere else. A non-required job that
+  # fails shows a red cross in the Checks list while the merge button stays
+  # enabled: the reviewer sees it and decides.
+  sca:
+    name: sca
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned Trivy version
+        id: trivy-version
+        # The Makefile is the pin. Repeating the number here would let the
+        # binary CI installs drift from the version the Makefile's guard
+        # demands, and the guard would fail every run.
+        run: echo "version=$(make -s print-trivy-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Trivy
+        # The installer only, not aquasecurity/trivy-action: the action would
+        # take the scan's flags as `with:` inputs, which is a second copy of
+        # the invocation that `make scan` already owns. Installing the binary
+        # and calling the target keeps CI and a local shell running the same
+        # command, which is the rule the Makefile is built around.
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v${{ steps.trivy-version.outputs.version }}
+
+      - name: Scan the locked dependencies
+        run: make scan
+
+  # Workflow syntax, expression errors and — through shellcheck — bugs in the
+  # `run:` blocks above: a mistyped `permissions:` key is otherwise ignored in
+  # silence by GitHub, which is to say it grants what it was written to
+  # withhold.
+  #
+  # It holds none of the nine rules at the top of this file, which is worth
+  # saying rather than leaving to be discovered: this job and the `zizmor` job
+  # below run past each other in both directions. actionlint reads a
+  # `permissions:` key and says whether it is a key; zizmor reads the block
+  # and says whether it is wider than the job. A workflow with a floating
+  # `runs-on` and no `timeout-minutes` is clean to both, which is what
+  # `make audit-policy` is for. Three checks, no overlap, and the list of
+  # which holds what is at the top of the file.
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint the workflows
+        env:
+          # Official image, pinned to an exact release and to that release's
+          # digest (re-read from the registry on 2026-09-21). It ships
+          # shellcheck and pyflakes, which actionlint picks up off PATH to
+          # check `run:` blocks.
+          ACTIONLINT_IMAGE: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        run: |
+          docker run --rm --entrypoint shellcheck "$ACTIONLINT_IMAGE" --version
+          docker run --rm -v "$PWD:/repo:ro" --workdir /repo "$ACTIONLINT_IMAGE" -color -verbose
+
+  # The hardening at the top of this file, checked rather than remembered — the
+  # three rules zizmor has an audit for, and through `make audit`'s
+  # `audit-policy` prerequisite the five it does not. The job's name is
+  # `zizmor` because that string is a required status check in the branch
+  # ruleset and renaming it would silently stop satisfying one; the target is
+  # what says what actually ran.
+  #
+  # Installed and invoked exactly as Trivy is: the Makefile holds the pin, this
+  # job reads it back, and the check is `make audit` rather than a second copy
+  # of the invocation written in YAML. The obvious alternative,
+  # zizmorcore/zizmor-action, loses on the argument that already ruled out
+  # trivy-action — it takes the flags as `with:` inputs, so the hook in
+  # .pre-commit-config.yaml could not run the same command as this job, and
+  # its SARIF upload asks for `security-events: write` to publish a report
+  # nothing here reads.
+  #
+  # No token on the audit step, and that is not an omission this job would
+  # survive by accident: zizmor selects offline or online mode from whether
+  # one is in the environment, and the mode moves the verdict. `make audit`
+  # passes `--offline` so that the presence of a token changes nothing, here
+  # or in a contributor's shell. The one token in this job is scoped to the
+  # install step, for the provenance check, and is gone before `make audit`
+  # runs. The measurement behind that is with the target in the Makefile.
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned zizmor version
+        id: zizmor-version
+        # As with Trivy: the Makefile is the pin, and `check-zizmor` demands
+        # this exact version of whatever the step below installs, so the two
+        # cannot drift without the target saying so.
+        run: echo "version=$(make -s print-zizmor-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install zizmor
+        env:
+          VERSION: ${{ steps.zizmor-version.outputs.version }}
+          # For `gh attestation verify` below and nothing else: scoped to this
+          # step, so the audit step after it runs with no token in its
+          # environment, which the job comment above requires. The
+          # attestations endpoint is a public read; the token is a rate limit
+          # lifted, not an authorisation granted, and `contents: read` is all
+          # it carries.
+          GH_TOKEN: ${{ github.token }}
+        # No action for this one, and no checksum file to verify against: the
+        # release publishes five archives and nothing beside them. What it
+        # does publish, attached to each archive rather than beside it, is a
+        # Sigstore build-provenance attestation, and `gh` — preinstalled on
+        # the runner — verifies it in one line. That is stronger than the
+        # checksum file the Terraform repository's tools shipped: a checksum
+        # detects a truncated or corrupted download, while the attestation
+        # binds this exact archive to zizmor's own release workflow at this
+        # tag, so a tarball that was rebuilt, replaced or truncated fails
+        # here rather than running. Measured 2026-09-21 on the v1.30.1
+        # archive: verify exits 0; against the wrong `--repo` it exits 1; with
+        # one byte appended to the tarball it exits 1. A binary that is
+        # somehow the wrong version still fails in `check-zizmor` one step
+        # later.
+        #
+        # The archive holds the binary alone. Its directory goes on PATH rather
+        # than into a system one, so no step here needs to be root.
+        run: |
+          workdir="$(mktemp -d)"
+          archive="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl --fail --silent --show-error --location \
+            --output "${workdir}/${archive}" \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${VERSION}/${archive}"
+          gh attestation verify "${workdir}/${archive}" --repo zizmorcore/zizmor
+          tar -xzf "${workdir}/${archive}" -C "${workdir}" zizmor
+          echo "${workdir}" >> "$GITHUB_PATH"
+
+      - name: Audit the workflows
+        # No `env:` here, and none inherited: this step sees no token.
+        run: make audit
+
+  # The audits `make audit` cannot run, on every pull request — and, with
+  # `sca` above, one of the two jobs in this file that is deliberately not a
+  # required check.
+  #
+  # It exists because rule 1 above is split and the second half had no
+  # enforcement at all. `ref-version-mismatch` compares a SHA pin against the
+  # `# vX.Y.Z` comment written beside it, and it does not run offline: a
+  # rewritten version comment produces nothing from `make audit` and one
+  # medium `warning[ref-version-mismatch]` here, with `make audit-online`
+  # exiting 2. It is a job rather than a sentence asking a person to remember,
+  # which is the only form the answer can take once .github/dependabot.yml is
+  # opening the pull requests that move those pins.
+  #
+  # **A separate job, never a second step in `zizmor` above.** That job is a
+  # required check, and folding this into it would make a required check depend
+  # on a credential and on GitHub's advisory database — the two properties the
+  # `audit-online` target in the Makefile argues at length disqualify it from
+  # ever being a gate. One half of that argument is weaker than it was written:
+  # a Dependabot pull request's read-only token does satisfy this job, so "the
+  # required set is kept credential-free so bot pull requests can satisfy it"
+  # is not what rules this out. The other half is untouched and decides it on
+  # its own — `known-vulnerable-actions` reports on a database that moves
+  # without a commit, so a required check running it could take `main` red on a
+  # Tuesday with nothing in this repository having changed.
+  #
+  # Not required, and not `continue-on-error: true` either, for the reason
+  # given at `sca` above.
+  #
+  # No `paths:` filter, and not out of laziness. A `paths:` at workflow level
+  # would apply to all ten jobs and stop the seven required ones reporting on
+  # any pull request that touches no workflow file — which leaves them
+  # "Expected — Waiting for status" forever, the trap `plan-gate` exists in
+  # plan.yml to disarm. A per-job filter would work and is still not worth it:
+  # the zizmor step costs seconds and the CODEOWNERS step below is one API
+  # call, and running it unconditionally removes the whole class of bug where
+  # a path pattern and the files that actually matter drift apart.
+  #
+  # The token is a rate limit lifted, not an authorisation granted. Every
+  # online audit is a public read — `ref-version-mismatch` and
+  # `impostor-commit` list refs on github.com, `known-vulnerable-actions` reads
+  # `api.github.com/advisories` — and none of them needs a permission this job
+  # could be given. The same is true of the CODEOWNERS step: that endpoint
+  # answers a public repository with no token at all and returns an empty
+  # `X-Accepted-Oauth-Scopes`. The rate limit is raised by the token being
+  # authenticated at all, not by anything it is allowed to reach. So the grant
+  # below stops at the `contents: read` the checkout needs.
+  #
+  # Two online reads of two different files, then, in one job. They are
+  # together because they share every property that decides where a check
+  # goes — not required, network-dependent, cheap, and run on every pull
+  # request — and splitting them would buy a second row in the Checks list and
+  # a second checkout for one API call.
+  audit-online:
+    name: audit-online
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned zizmor version
+        id: zizmor-version
+        # The same pin the `zizmor` job above reads, from the same place. Two
+        # jobs running two versions of the same binary against the same tree
+        # would be two answers with nothing to say which is current.
+        run: echo "version=$(make -s print-zizmor-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install zizmor
+        env:
+          VERSION: ${{ steps.zizmor-version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        # Installed exactly as the `zizmor` job above installs it, down to the
+        # archive name and the provenance check, and the reasoning is written
+        # out there rather than repeated here.
+        run: |
+          workdir="$(mktemp -d)"
+          archive="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl --fail --silent --show-error --location \
+            --output "${workdir}/${archive}" \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${VERSION}/${archive}"
+          gh attestation verify "${workdir}/${archive}" --repo zizmorcore/zizmor
+          tar -xzf "${workdir}/${archive}" -C "${workdir}" zizmor
+          echo "${workdir}" >> "$GITHUB_PATH"
+
+      - name: Audit the workflows against the GitHub API
+        env:
+          # `make audit-online` refuses to run without one rather than letting
+          # zizmor fall back to offline and report a clean pass having skipped
+          # every audit this job exists for. On a pull request from a fork this
+          # is still issued and still read-only, which is all the target needs.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make audit-online
+
+      # A second online read, in this job because this job is what it is: a
+      # network call on every pull request that can go red without anything in
+      # this repository having changed, reported beside a merge button that
+      # still works. It has nothing to do with zizmor and is not folded into
+      # `make audit-online` for that reason — the Makefile target is the
+      # workflow auditor and this is a check on a different file.
+      #
+      # What it holds is stated in .github/CODEOWNERS at length: an owner that
+      # does not exist or lacks write access is skipped by GitHub silently —
+      # no error, no annotation, no check run — so without this step nothing
+      # anywhere would notice a CODEOWNERS that had stopped naming anybody.
+      # The likeliest way that happens is not this repository's handle being
+      # renamed. It is a cloner replacing the handle with their own and
+      # mistyping it, which this catches on their first pull request.
+      #
+      # `?ref=` is honoured, including the `refs/pull/N/merge` ref that
+      # `github.ref` carries on a pull request event, so what is validated is
+      # the file as it will be after the merge rather than the file on `main`.
+      # On a push it validates `refs/heads/main`.
+      #
+      # **A 404 does not mean one thing here.** A repository with no
+      # `.github/CODEOWNERS` answers 404 rather than `{"errors":[]}`, which is
+      # why deleting the file must not silence the check that exists to notice
+      # the file. A ref that does not resolve 404s too. And the endpoint
+      # caches per exact ref string, and a query that arrives before the index
+      # for that string is built caches the 404 — measured in the Terraform
+      # repository on 2026-08-31, minutes after its CODEOWNERS first landed:
+      # the two spellings queried in the first minutes after the merge were
+      # still failing eighteen minutes later under a once-a-minute poll, while
+      # spellings nobody had tried answered 200 on first ask.
+      #
+      # So a 404 is ambiguous in a way that decides what this step should do,
+      # and the step asks rather than guesses. It tries a second spelling of
+      # the same tree — `github.sha`, a different cache key — and only if that
+      # also 404s does it work out which cause it is looking at, using two
+      # endpoints that have no CODEOWNERS index behind them and so cannot be
+      # poisoned the same way. The file being genuinely absent is the only one
+      # of the three that fails the job. The other two warn: a check that goes
+      # red for a reason that is not about CODEOWNERS teaches a maintainer to
+      # ignore it, and this job is not required precisely so that its red
+      # means something when it appears.
+      #
+      # The re-run case is the one that makes this concrete rather than
+      # theoretical. `refs/pull/N/merge` stops existing once the pull request
+      # merges, so re-running this job on a merged pull request asks about a
+      # ref that is gone. That is not a CODEOWNERS failure and does not report
+      # as one.
+      #
+      # What it does not cover: the endpoint reports unknown owners and misses
+      # invalid *patterns* entirely, and it answers `{"errors":[]}` on private
+      # repositories regardless. Neither bites a public repository whose
+      # CODEOWNERS holds the single pattern `*`, and both are written down
+      # where the next pattern gets added.
+      - name: Check that CODEOWNERS names an owner that resolves
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Two spellings of one tree, because the endpoint caches per exact
+          # ref string and a poisoned entry under one is not poisoned under
+          # the other. A 200 under either is the same answer about the same
+          # file.
+          response=""
+          for ref in "${REF}" "${SHA}"; do
+            if response="$(gh api \
+              "/repos/${GITHUB_REPOSITORY}/codeowners/errors?ref=${ref}")"; then
+              break
+            fi
+            response=""
+          done
+
+          if [ -z "$response" ]; then
+            # Neither answered. `contents` and `commits` are ordinary git
+            # reads with no CODEOWNERS index behind them, so between them they
+            # say which of the three causes this is.
+            if gh api "/repos/${GITHUB_REPOSITORY}/contents/.github/CODEOWNERS?ref=${SHA}" \
+              >/dev/null 2>&1; then
+              echo "::warning::codeowners/errors answered 404 at both ${REF}" \
+                   "and ${SHA}, but .github/CODEOWNERS is present at that" \
+                   "commit. That is the endpoint's per-ref cache, not this" \
+                   "repository — the owner named in the file was not checked" \
+                   "on this run."
+            elif ! gh api "/repos/${GITHUB_REPOSITORY}/commits/${SHA}" \
+              >/dev/null 2>&1; then
+              echo "::warning::${SHA} no longer resolves, so there is nothing" \
+                   "to read a CODEOWNERS from. This is what a re-run of this" \
+                   "job on an already-merged pull request looks like:" \
+                   "refs/pull/N/merge stops existing once it merges."
+            else
+              echo "::error::.github/CODEOWNERS is absent at ${SHA} and" \
+                   "codeowners/errors 404s for it. A repository with no" \
+                   "CODEOWNERS 404s here rather than reporting an empty error" \
+                   "list, so this fails rather than passing quietly."
+              exit 1
+            fi
+            exit 0
+          fi
+
+          count="$(jq '.errors | length' <<< "$response")"
+          if [ "$count" -ne 0 ]; then
+            # `.suggestion` is deliberately not printed: it is a multi-line
+            # excerpt with a caret under the offending column, and a workflow
+            # annotation is one line. `.message` already names the owner and
+            # what is wrong with it.
+            jq -r '.errors[]
+                   | "::error file=\(.path),line=\(.line),col=\(.column)::\(.kind): \(.message)"' \
+              <<< "$response"
+            exit 1
+          fi
+
+          # `${ref}` rather than `${REF}`: the loop above leaves it holding
+          # the spelling that answered, which is the one worth reporting when
+          # the first was the one that 404d.
+          echo "CODEOWNERS at ${ref}: no errors"
+
+  # The pull request title becomes the subject of the squashed commit, so it is
+  # checked with the same rigour as the code. Skipped on push, where there is
+  # no pull request to read a title from; main only ever receives commits
+  # through a pull request, so the title has always been checked by then.
+  pr-title:
+    name: pr-title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The only job here that checks nothing out and calls no API: the title it
+    # reads arrives in the event payload, which is not a resource a token grants
+    # access to. So it keeps the workflow-level nothing, and a `contents: read`
+    # added here out of symmetry would be a grant with no reader.
+    permissions: {}
+    steps:
+      - name: Check the title against Conventional Commits
+        env:
+          # Passed through the environment, never interpolated into the script:
+          # a title is attacker-controlled text and `${{ ... }}` would splice it
+          # straight into the shell.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|docs|style|refactor|test|build|ci|chore|perf|revert)(\([^()]+\))?!?: .+$'
+          if printf '%s' "$PR_TITLE" | grep -Eq "$pattern"; then
+            echo "ok: $PR_TITLE"
+            exit 0
+          fi
+          {
+            echo "The pull request title is not a Conventional Commit."
+            echo
+            echo "  title:    $PR_TITLE"
+            echo "  expected: <type>[(scope)][!]: <subject>"
+            echo "  types:    feat fix docs style refactor test build ci chore perf revert"
+            echo
+            echo "  example:  ci: add pull-request validation for format and syntax"
+          } >&2
+          exit 1

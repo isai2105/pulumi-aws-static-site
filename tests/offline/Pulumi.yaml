@@ -1,0 +1,13 @@
+# The credential-free preview (LOCKED-3): scripts/preview_offline.sh runs this program against a
+# throwaway file:// backend with fake-key providers and the tftest fixtures as stack config.
+# The throwaway stack is named `test`, so pulumi.get_stack() is the fixture environment.
+# No `backend:` block (LOCKED-1): the script sets PULUMI_BACKEND_URL itself.
+name: static-site-offline
+description: Offline fixture program for pulumi-aws-static-site - previews StaticSite with placeholder credentials and no network
+runtime:
+  name: python
+  options:
+    # uv: the workspace .venv at the repository root (uv.lock is the dependency pin, UV_LOCKED=1 the guard).
+    toolchain: uv
+    # mypy --strict runs before every preview, the same way the Makefile's typecheck target runs it.
+    typechecker: mypy

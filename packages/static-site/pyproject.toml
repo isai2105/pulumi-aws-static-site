@@ -1,0 +1,13 @@
+[project]
+name = "static-site"
+version = "0.1.0"
+requires-python = ">=3.13.15"
+dependencies = [
+    "pulumi==3.263.0",
+    "pulumi-aws==7.46.0",
+    "pulumi-random==4.21.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
