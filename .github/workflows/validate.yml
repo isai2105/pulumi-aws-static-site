@@ -295,7 +295,7 @@ jobs:
         run: echo "version=$(make -s print-uv-version)" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ steps.uv-version.outputs.version }}
           # No GitHub Actions cache. Every package this job runs is resolved
@@ -337,7 +337,7 @@ jobs:
         run: echo "version=$(make -s print-uv-version)" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ steps.uv-version.outputs.version }}
           enable-cache: false
@@ -395,7 +395,7 @@ jobs:
         run: echo "version=$(make -s print-uv-version)" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ steps.uv-version.outputs.version }}
           enable-cache: false
@@ -409,7 +409,7 @@ jobs:
         # from it. The verbs are the Makefile's, so that a local run and a
         # green check are the same command; `make check-pulumi` then demands
         # exactly the version this step installed.
-        uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7.0.0
+        uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
         with:
           pulumi-version-file: .pulumi.version
 
@@ -633,7 +633,7 @@ jobs:
         run: echo "version=$(make -s print-uv-version)" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ steps.uv-version.outputs.version }}
           enable-cache: false
